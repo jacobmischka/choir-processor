@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 
 from argparse import ArgumentParser
-from os.path import splitext
+from os.path import splitext, join
 from xml.etree import ElementTree as ET
-import sys
+import sys, os
 
 
 def parse_file(path):
-    _, ext = splitext(path)
-    if ext == ".java":
-        return JavaQuestionnaire(path)
-    elif ext == ".xml":
-        return XmlQuestionnaire(path)
+    try:
+        _, ext = splitext(path)
+        if ext == ".java":
+            return JavaQuestionnaire(path)
+        elif ext == ".xml":
+            return XmlQuestionnaire(path)
+    except Exception as e:
+        print("Failed parsing file {}, {}".format(path, e))
 
 
 def print_file(path):
@@ -23,6 +26,7 @@ def main():
     subparsers = parser.add_subparsers(title="commands")
     subparsers.add_parser("process").set_defaults(func=handle_process)
     subparsers.add_parser("questionnaire").set_defaults(func=handle_questionnaire)
+    subparsers.add_parser("dir").set_defaults(func=handle_questionnaire_dir)
     parser.add_argument("infile")
     parser.add_argument("-o, --outfile", required=False, dest="outfile")
 
@@ -30,11 +34,12 @@ def main():
 
     result = args.func(args)
 
-    if args.outfile:
-        with open(args.outfile, "w") as outfile:
-            print(result, file=outfile)
-    else:
-        print(result)
+    if args.func != handle_questionnaire_dir:
+        if args.outfile:
+            with open(args.outfile, "w") as outfile:
+                print(result, file=outfile)
+        else:
+            print(result)
 
 
 def handle_process(args):
@@ -44,6 +49,24 @@ def handle_process(args):
 
 def handle_questionnaire(args):
     return parse_file(args.infile)
+
+
+def handle_questionnaire_dir(args):
+    if not args.outfile:
+        print("Must specify an out directory when using dir", file=sys.stderr)
+        return
+
+    os.makedirs(args.outfile, exist_ok=True)
+
+    for root, dirs, files in os.walk(args.infile):
+        for file_name in files:
+            basename, ext = splitext(file_name)
+            out_name = "{}.md".format(basename)
+            out_path = join(args.outfile, out_name)
+
+            in_path = join(root, file_name)
+            with open(out_path, "w") as outfile:
+                print(parse_file(in_path), file=outfile)
 
 
 class Process(object):
@@ -61,7 +84,9 @@ class ProcessType(object):
     def __init__(self, title, root):
         self.title = title
         self.root = root
-        self.questionnaires = [self.parse_questionnaire(x) for x in self.root]
+        self.questionnaires = [
+            self.parse_questionnaire(x) for x in self.root.iter("Questionaire")
+        ]
 
     @staticmethod
     def parse_questionnaire(q_root):
@@ -112,28 +137,42 @@ class XmlQuestionnaire(Questionnaire):
 
         super().__init__(form.attrib.get("Description"))
 
-        for item in form.find("Items").iter("Item"):
-            descriptions = item.findall("Description")
-            title = None
-            subtitle = None
-            if len(descriptions) > 0:
-                title = descriptions[0].text
-            if len(descriptions) > 1:
-                subtitle = descriptions[1].text
-            question = Question(title, subtitle)
+        items = form.find("Items")
+        if items:
+            for item in items.iter("Item"):
+                descriptions = item.findall("Description")
+                title = None
+                subtitle = None
+                if len(descriptions) > 0:
+                    title = descriptions[0].text
+                if len(descriptions) > 1:
+                    subtitle = descriptions[1].text
+                question = Question(title, subtitle)
 
-            responses = item.find("Responses").findall("Response")
-            for response in responses:
-                if (
-                    response.get("Type") == "select1"
-                    or response.get("Type") == "select"
-                ):
-                    for i in response.iter("item"):
-                        label = i.find("label").text
-                        value = i.find("value").text
-                        question.add_option(label, value)
-                else:
-                    print("ERROR: Unsupported question type", file=sys.stderr)
+                responses = item.find("Responses").findall("Response")
+                if responses:
+                    for response in responses:
+                        response_type = response.get("Type")
+                        if response_type == "select1" or response_type == "select":
+                            for i in response.iter("item"):
+                                label = i.find("label").text
+                                value = i.find("value").text
+                                question.add_option(label, value)
+                        elif response_type == "radio":
+                            value = ""
+                            score = response.find("Score")
+                            if score:
+                                value = score.get("value")
+                            question.add_option(response.get("Description"), value)
+                        elif response_type == "input":
+                            pass
+                        else:
+                            print(
+                                "ERROR: Unsupported response type: {}".format(
+                                    response.get("Type")
+                                ),
+                                file=sys.stderr,
+                            )
 
                 self.add_question(question)
 
